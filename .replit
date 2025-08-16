@@ -19,3 +19,7 @@ mode = "sequential"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd LinkedIn-Connection-Aggregator && python main.py"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
