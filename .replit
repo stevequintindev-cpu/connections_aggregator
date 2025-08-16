@@ -3,6 +3,7 @@ run = "python main.py"
 
 [nix]
 channel = "stable-25_05"
+packages = ["glibcLocales"]
 
 [deployment]
 run = ["sh", "-c", "python main.py"]
@@ -17,4 +18,4 @@ mode = "sequential"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python main.py"
+args = "cd LinkedIn-Connection-Aggregator && python main.py"
