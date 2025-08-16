@@ -1,0 +1,789 @@
+
+"""
+LinkedIn Connection Aggregator Tool
+A Flask-based application for aggregating and searching employee LinkedIn connections
+"""
+
+import os
+import sqlite3
+import pandas as pd
+from flask import Flask, request, jsonify, render_template_string
+from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+from datetime import datetime
+import json
+from fuzzywuzzy import fuzz, process
+import re
+from typing import List, Dict, Optional
+import hashlib
+
+# Initialize Flask app
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-here')
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+CORS(app)
+
+# Ensure upload directory exists
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# Database setup
+DB_PATH = 'connections.db'
+
+def init_db():
+    """Initialize the database with required tables"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Employees table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS employees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            name TEXT NOT NULL,
+            department TEXT,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Connections table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS connections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER NOT NULL,
+            first_name TEXT,
+            last_name TEXT,
+            company TEXT,
+            position TEXT,
+            email TEXT,
+            linkedin_url TEXT,
+            connected_on DATE,
+            connection_hash TEXT UNIQUE,
+            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (employee_id) REFERENCES employees(id)
+        )
+    ''')
+    
+    # Company normalization table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS company_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company_name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL,
+            confidence_score REAL
+        )
+    ''')
+    
+    # Search history for analytics
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS search_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER,
+            search_query TEXT,
+            results_count INTEGER,
+            searched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (employee_id) REFERENCES employees(id)
+        )
+    ''')
+    
+    # Create indexes for better performance
+    c.execute('CREATE INDEX IF NOT EXISTS idx_company ON connections(company)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_employee ON connections(employee_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_hash ON connections(connection_hash)')
+    
+    conn.commit()
+    conn.close()
+
+class ConnectionProcessor:
+    """Process and normalize LinkedIn CSV data"""
+    
+    @staticmethod
+    def generate_connection_hash(row: pd.Series) -> str:
+        """Generate unique hash for deduplication"""
+        unique_str = f"{row.get('First Name', '')}{row.get('Last Name', '')}{row.get('Company', '')}{row.get('Email Address', '')}"
+        return hashlib.md5(unique_str.lower().encode()).hexdigest()
+    
+    @staticmethod
+    def normalize_company_name(company: str) -> str:
+        """Normalize company names for better matching"""
+        if not company:
+            return ""
+        
+        # Remove common suffixes
+        suffixes = [' LLC', ' Inc.', ' Inc', ' Corporation', ' Corp.', ' Corp', 
+                   ' Ltd.', ' Ltd', ' Limited', ' GmbH', ' AG', ' SA', ' PLC']
+        normalized = company
+        for suffix in suffixes:
+            normalized = re.sub(f'{suffix}$', '', normalized, flags=re.IGNORECASE)
+        
+        # Remove extra spaces and convert to title case
+        normalized = ' '.join(normalized.split()).title()
+        return normalized
+    
+    @staticmethod
+    def process_csv(file_path: str, employee_id: int) -> Dict:
+        """Process uploaded CSV file"""
+        try:
+            # Read CSV with multiple encoding attempts
+            encodings = ['utf-8', 'latin-1', 'iso-8859-1']
+            df = None
+            for encoding in encodings:
+                try:
+                    df = pd.read_csv(file_path, encoding=encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if df is None:
+                return {'error': 'Could not read CSV file with any encoding'}
+            
+            # Expected columns (LinkedIn format)
+            expected_cols = ['First Name', 'Last Name', 'Company', 'Position', 'Connected On']
+            
+            # Check if essential columns exist
+            missing_cols = [col for col in expected_cols[:3] if col not in df.columns]
+            if missing_cols:
+                return {'error': f'Missing required columns: {missing_cols}'}
+            
+            # Process connections
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            
+            new_connections = 0
+            duplicate_connections = 0
+            
+            for _, row in df.iterrows():
+                # Generate hash for deduplication
+                connection_hash = ConnectionProcessor.generate_connection_hash(row)
+                
+                # Check if connection already exists
+                c.execute('SELECT id FROM connections WHERE connection_hash = ?', (connection_hash,))
+                if c.fetchone():
+                    duplicate_connections += 1
+                    continue
+                
+                # Parse connected date
+                connected_date = None
+                if pd.notna(row.get('Connected On')):
+                    try:
+                        connected_date = pd.to_datetime(row['Connected On']).date()
+                    except:
+                        pass
+                
+                # Insert new connection
+                c.execute('''
+                    INSERT INTO connections 
+                    (employee_id, first_name, last_name, company, position, email, 
+                     connected_on, connection_hash)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    employee_id,
+                    row.get('First Name', ''),
+                    row.get('Last Name', ''),
+                    ConnectionProcessor.normalize_company_name(row.get('Company', '')),
+                    row.get('Position', ''),
+                    row.get('Email Address', ''),
+                    connected_date,
+                    connection_hash
+                ))
+                new_connections += 1
+            
+            conn.commit()
+            conn.close()
+            
+            return {
+                'success': True,
+                'new_connections': new_connections,
+                'duplicates': duplicate_connections,
+                'total_processed': len(df)
+            }
+            
+        except Exception as e:
+            return {'error': str(e)}
+
+class AgenticSearch:
+    """AI-powered natural language search interface"""
+    
+    @staticmethod
+    def parse_query(query: str) -> Dict:
+        """Parse natural language query to extract intent and entities"""
+        query_lower = query.lower()
+        
+        # Extract company names (simple heuristic - could use NER for better results)
+        # Look for patterns like "at Company" or "from Company"
+        company_patterns = [
+            r'at\s+([A-Z][A-Za-z\s&]+)',
+            r'from\s+([A-Z][A-Za-z\s&]+)',
+            r'(?:who knows|connected to)\s+(?:someone|anyone|people)\s+(?:at|from)\s+([A-Z][A-Za-z\s&]+)',
+            r'connections?\s+(?:at|to|with)\s+([A-Z][A-Za-z\s&]+)'
+        ]
+        
+        companies = []
+        for pattern in company_patterns:
+            matches = re.findall(pattern, query, re.IGNORECASE)
+            companies.extend(matches)
+        
+        # Clean up company names
+        companies = [c.strip() for c in companies]
+        
+        # Determine query type
+        query_type = 'search'
+        if 'how many' in query_lower:
+            query_type = 'count'
+        elif 'top' in query_lower or 'most' in query_lower:
+            query_type = 'analytics'
+        
+        return {
+            'type': query_type,
+            'companies': companies,
+            'original_query': query
+        }
+    
+    @staticmethod
+    def execute_search(parsed_query: Dict, employee_id: Optional[int] = None) -> Dict:
+        """Execute search based on parsed query"""
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        
+        results = []
+        
+        if parsed_query['type'] == 'search' and parsed_query['companies']:
+            for company in parsed_query['companies']:
+                # Use fuzzy matching for company names
+                c.execute('SELECT DISTINCT company FROM connections')
+                all_companies = [row['company'] for row in c.fetchall()]
+                
+                # Find best matches
+                matches = process.extract(company, all_companies, scorer=fuzz.token_sort_ratio, limit=3)
+                
+                for matched_company, score in matches:
+                    if score > 70:  # Threshold for match confidence
+                        c.execute('''
+                            SELECT c.*, e.name as employee_name, e.email as employee_email
+                            FROM connections c
+                            JOIN employees e ON c.employee_id = e.id
+                            WHERE c.company = ?
+                            ORDER BY c.first_name, c.last_name
+                        ''', (matched_company,))
+                        
+                        for row in c.fetchall():
+                            results.append({
+                                'connection_name': f"{row['first_name']} {row['last_name']}",
+                                'company': row['company'],
+                                'position': row['position'],
+                                'employee_name': row['employee_name'],
+                                'employee_email': row['employee_email'],
+                                'match_confidence': score
+                            })
+        
+        # Log search
+        if employee_id:
+            c.execute('''
+                INSERT INTO search_history (employee_id, search_query, results_count)
+                VALUES (?, ?, ?)
+            ''', (employee_id, parsed_query['original_query'], len(results)))
+            conn.commit()
+        
+        conn.close()
+        
+        return {
+            'query': parsed_query,
+            'results': results,
+            'count': len(results)
+        }
+
+# API Routes
+
+@app.route('/')
+def index():
+    """Serve the main HTML interface"""
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    """Register a new employee"""
+    data = request.json
+    
+    email = data.get('email')
+    name = data.get('name')
+    password = data.get('password')
+    department = data.get('department', '')
+    
+    if not all([email, name, password]):
+        return jsonify({'error': 'Email, name, and password are required'}), 400
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Check if user exists
+    c.execute('SELECT id FROM employees WHERE email = ?', (email,))
+    if c.fetchone():
+        conn.close()
+        return jsonify({'error': 'User already exists'}), 409
+    
+    # Create user
+    password_hash = generate_password_hash(password)
+    c.execute('''
+        INSERT INTO employees (email, name, department, password_hash)
+        VALUES (?, ?, ?, ?)
+    ''', (email, name, department, password_hash))
+    
+    conn.commit()
+    employee_id = c.lastrowid
+    conn.close()
+    
+    return jsonify({
+        'success': True,
+        'employee_id': employee_id,
+        'message': 'Registration successful'
+    }), 201
+
+@app.route('/api/upload', methods=['POST'])
+def upload_csv():
+    """Upload and process LinkedIn connections CSV"""
+    # Simple auth check (in production, use proper JWT/session management)
+    employee_id = request.form.get('employee_id')
+    if not employee_id:
+        return jsonify({'error': 'Employee ID required'}), 401
+    
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    if not file.filename.lower().endswith('.csv'):
+        return jsonify({'error': 'Only CSV files are allowed'}), 400
+    
+    # Save file
+    filename = secure_filename(f"{employee_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(filepath)
+    
+    # Process CSV
+    result = ConnectionProcessor.process_csv(filepath, int(employee_id))
+    
+    # Clean up file after processing
+    os.remove(filepath)
+    
+    if 'error' in result:
+        return jsonify(result), 400
+    
+    return jsonify(result), 200
+
+@app.route('/api/search', methods=['POST'])
+def search():
+    """Search connections with natural language or structured query"""
+    data = request.json
+    query = data.get('query', '')
+    employee_id = data.get('employee_id')
+    
+    if not query:
+        return jsonify({'error': 'Query required'}), 400
+    
+    # Parse and execute search
+    parsed_query = AgenticSearch.parse_query(query)
+    results = AgenticSearch.execute_search(parsed_query, employee_id)
+    
+    return jsonify(results), 200
+
+@app.route('/api/companies', methods=['GET'])
+def list_companies():
+    """List all unique companies in the database"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute('''
+        SELECT company, COUNT(*) as connection_count
+        FROM connections
+        WHERE company != ''
+        GROUP BY company
+        ORDER BY connection_count DESC
+        LIMIT 100
+    ''')
+    
+    companies = [{'name': row[0], 'count': row[1]} for row in c.fetchall()]
+    conn.close()
+    
+    return jsonify({'companies': companies}), 200
+
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    """Get system statistics"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    stats = {}
+    
+    # Total connections
+    c.execute('SELECT COUNT(*) FROM connections')
+    stats['total_connections'] = c.fetchone()[0]
+    
+    # Total employees
+    c.execute('SELECT COUNT(*) FROM employees')
+    stats['total_employees'] = c.fetchone()[0]
+    
+    # Unique companies
+    c.execute('SELECT COUNT(DISTINCT company) FROM connections WHERE company != ""')
+    stats['unique_companies'] = c.fetchone()[0]
+    
+    # Recent searches
+    c.execute('''
+        SELECT COUNT(*) FROM search_history 
+        WHERE searched_at > datetime('now', '-7 days')
+    ''')
+    stats['searches_last_week'] = c.fetchone()[0]
+    
+    conn.close()
+    
+    return jsonify(stats), 200
+
+# HTML Template for the web interface
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LinkedIn Connection Search Tool</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        .search-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 30px;
+        }
+        input[type="text"] {
+            flex: 1;
+            padding: 15px 20px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: all 0.3s;
+        }
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        button {
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+        }
+        .upload-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .stat-number {
+            font-size: 2em;
+            font-weight: bold;
+            color: #333;
+        }
+        .stat-label {
+            color: #666;
+            margin-top: 5px;
+        }
+        .results {
+            margin-top: 30px;
+        }
+        .result-card {
+            background: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 15px;
+            transition: all 0.3s;
+        }
+        .result-card:hover {
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            transform: translateY(-2px);
+        }
+        .connection-name {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        .connection-details {
+            color: #666;
+            line-height: 1.6;
+        }
+        .employee-tag {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 0.85em;
+            margin-top: 10px;
+        }
+        .example-queries {
+            background: #f0f4ff;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+        .example-queries h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        .example-queries ul {
+            list-style: none;
+            padding-left: 0;
+        }
+        .example-queries li {
+            padding: 5px 0;
+            color: #555;
+            cursor: pointer;
+            transition: color 0.2s;
+        }
+        .example-queries li:hover {
+            color: #667eea;
+        }
+        .example-queries li:before {
+            content: "→ ";
+            color: #667eea;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔗 Connection Search Tool</h1>
+        <p class="subtitle">AI-powered search across company LinkedIn connections</p>
+        
+        <div class="upload-section">
+            <h3>📤 Upload Your LinkedIn Connections</h3>
+            <p style="margin: 10px 0; color: #666;">
+                Export your connections from LinkedIn Settings > Data Privacy > Get a copy of your data
+            </p>
+            <input type="file" id="csvFile" accept=".csv" style="margin: 10px 0;">
+            <button onclick="uploadCSV()">Upload CSV</button>
+            <div id="uploadResult"></div>
+        </div>
+        
+        <div class="stats" id="stats">
+            <div class="stat-card">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Total Connections</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Unique Companies</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Contributing Employees</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Searches This Week</div>
+            </div>
+        </div>
+        
+        <div class="example-queries">
+            <h3>💡 Try these natural language queries:</h3>
+            <ul>
+                <li onclick="setQuery(this.textContent.substring(2))">Who at our company knows someone at Google?</li>
+                <li onclick="setQuery(this.textContent.substring(2))">Find connections from Microsoft</li>
+                <li onclick="setQuery(this.textContent.substring(2))">Show me anyone connected to people at Apple</li>
+                <li onclick="setQuery(this.textContent.substring(2))">List connections at Amazon</li>
+            </ul>
+        </div>
+        
+        <div class="search-box">
+            <input type="text" id="searchQuery" placeholder="Ask about connections in natural language...">
+            <button onclick="search()">Search</button>
+        </div>
+        
+        <div id="results" class="results"></div>
+    </div>
+    
+    <script>
+        // Simulate employee ID (in production, use proper auth)
+        const employeeId = localStorage.getItem('employeeId') || '1';
+        
+        // Load stats on page load
+        loadStats();
+        
+        function setQuery(query) {
+            document.getElementById('searchQuery').value = query;
+            search();
+        }
+        
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+                
+                const statCards = document.querySelectorAll('.stat-number');
+                statCards[0].textContent = stats.total_connections || '0';
+                statCards[1].textContent = stats.unique_companies || '0';
+                statCards[2].textContent = stats.total_employees || '0';
+                statCards[3].textContent = stats.searches_last_week || '0';
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+        
+        async function uploadCSV() {
+            const fileInput = document.getElementById('csvFile');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert('Please select a CSV file');
+                return;
+            }
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('employee_id', employeeId);
+            
+            const resultDiv = document.getElementById('uploadResult');
+            resultDiv.innerHTML = '<p style="color: #667eea;">Processing...</p>';
+            
+            try {
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    resultDiv.innerHTML = `
+                        <p style="color: green; margin-top: 10px;">
+                            ✅ Successfully processed! Added ${result.new_connections} new connections 
+                            (${result.duplicates} duplicates skipped)
+                        </p>
+                    `;
+                    loadStats();
+                } else {
+                    resultDiv.innerHTML = `<p style="color: red; margin-top: 10px;">❌ Error: ${result.error}</p>`;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `<p style="color: red; margin-top: 10px;">❌ Upload failed: ${error.message}</p>`;
+            }
+        }
+        
+        async function search() {
+            const query = document.getElementById('searchQuery').value;
+            if (!query) return;
+            
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<p>Searching...</p>';
+            
+            try {
+                const response = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        query: query,
+                        employee_id: employeeId
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.results.length === 0) {
+                    resultsDiv.innerHTML = '<p>No connections found matching your query.</p>';
+                    return;
+                }
+                
+                let html = `<h3>Found ${data.count} connection(s)</h3>`;
+                
+                data.results.forEach(result => {
+                    html += `
+                        <div class="result-card">
+                            <div class="connection-name">${result.connection_name}</div>
+                            <div class="connection-details">
+                                <strong>Company:</strong> ${result.company}<br>
+                                <strong>Position:</strong> ${result.position || 'Not specified'}<br>
+                                <span class="employee-tag">Connected via ${result.employee_name}</span>
+                            </div>
+                        </div>
+                    `;
+                });
+                
+                resultsDiv.innerHTML = html;
+            } catch (error) {
+                resultsDiv.innerHTML = `<p style="color: red;">Search failed: ${error.message}</p>`;
+            }
+        }
+        
+        // Allow Enter key to trigger search
+        document.getElementById('searchQuery').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') search();
+        });
+    </script>
+</body>
+</html>
+'''
+
+if __name__ == '__main__':
+    # Initialize database
+    init_db()
+    
+    # Run the Flask app
+    print("🚀 LinkedIn Connection Search Tool")
+    print("📍 Access the tool at: http://localhost:5000")
+    print("\n📋 Instructions:")
+    print("1. Have employees export their LinkedIn connections CSV")
+    print("2. Upload the CSV files through the web interface")
+    print("3. Search using natural language queries")
+    print("\nPress Ctrl+C to stop the server")
+    
+    app.run(debug=True, host='0.0.0.0', port=5000)

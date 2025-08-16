@@ -1,0 +1,138 @@
+/* Custom styles for LinkedIn Connection Aggregator */
+
+:root {
+    --linkedin-blue: #0077b5;
+    --linkedin-light-blue: #00a0dc;
+}
+
+.navbar-brand {
+    font-weight: 600;
+}
+
+.fab.fa-linkedin {
+    color: var(--linkedin-blue);
+}
+
+.card {
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    border: 1px solid rgba(255, 255, 255, 0.125);
+}
+
+.card-header {
+    background: rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.125);
+}
+
+.btn-linkedin {
+    background-color: var(--linkedin-blue);
+    border-color: var(--linkedin-blue);
+    color: white;
+}
+
+.btn-linkedin:hover {
+    background-color: var(--linkedin-light-blue);
+    border-color: var(--linkedin-light-blue);
+    color: white;
+}
+
+.table-hover tbody tr:hover {
+    background-color: rgba(255, 255, 255, 0.075);
+}
+
+.search-suggestions {
+    font-size: 0.875rem;
+}
+
+.upload-info {
+    background-color: rgba(13, 202, 240, 0.1);
+    border: 1px solid rgba(13, 202, 240, 0.2);
+    border-radius: 0.375rem;
+    padding: 1rem;
+    margin-top: 1rem;
+}
+
+.stats-card {
+    transition: transform 0.2s ease-in-out;
+}
+
+.stats-card:hover {
+    transform: translateY(-2px);
+}
+
+.company-list {
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.search-history {
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+.connection-card {
+    border-left: 4px solid var(--linkedin-blue);
+}
+
+.confidence-badge {
+    font-size: 0.75rem;
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+    .display-4 {
+        font-size: 2rem;
+    }
+    
+    .card-body {
+        padding: 1rem;
+    }
+}
+
+/* Loading states */
+.loading {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+.loading::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 20px;
+    height: 20px;
+    margin: -10px 0 0 -10px;
+    border: 2px solid transparent;
+    border-top: 2px solid var(--bs-primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+/* Alert improvements */
+.alert {
+    border: none;
+    border-radius: 0.5rem;
+}
+
+.alert-success {
+    background-color: rgba(25, 135, 84, 0.1);
+    color: #198754;
+    border-left: 4px solid #198754;
+}
+
+.alert-danger {
+    background-color: rgba(220, 53, 69, 0.1);
+    color: #dc3545;
+    border-left: 4px solid #dc3545;
+}
+
+.alert-info {
+    background-color: rgba(13, 202, 240, 0.1);
+    color: #0dcaf0;
+    border-left: 4px solid #0dcaf0;
+}

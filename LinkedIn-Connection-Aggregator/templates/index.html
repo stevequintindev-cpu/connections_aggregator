@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LinkedIn Connection Aggregator</title>
+    <link href="https://cdn.replit.com/agent/bootstrap-agent-dark-theme.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container">
+            <a class="navbar-brand" href="/">
+                <i class="fab fa-linkedin me-2"></i>
+                Connection Aggregator
+            </a>
+            
+            {% if user %}
+            <div class="navbar-nav ms-auto">
+                <span class="navbar-text me-3">
+                    Welcome, {{ user.name }}
+                </span>
+                <a class="nav-link" href="/logout">
+                    <i class="fas fa-sign-out-alt"></i> Logout
+                </a>
+            </div>
+            {% endif %}
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <!-- Flash Messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ 'danger' if category == 'error' else 'primary' if category == 'info' else category }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {% if not user %}
+            <!-- Landing Page -->
+            <div class="row justify-content-center">
+                <div class="col-lg-8">
+                    <div class="text-center mb-5">
+                        <h1 class="display-4 mb-3">
+                            <i class="fab fa-linkedin text-primary"></i>
+                            LinkedIn Connection Aggregator
+                        </h1>
+                        <p class="lead">
+                            Aggregate and intelligently search through your team's LinkedIn connections to find the right introductions.
+                        </p>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="card h-100">
+                                <div class="card-body">
+                                    <h5 class="card-title">
+                                        <i class="fas fa-sign-in-alt text-success me-2"></i>
+                                        Login
+                                    </h5>
+                                    <form method="POST" action="/login">
+                                        <div class="mb-3">
+                                            <label for="loginEmail" class="form-label">Email</label>
+                                            <input type="email" class="form-control" id="loginEmail" name="email" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label for="loginPassword" class="form-label">Password</label>
+                                            <input type="password" class="form-control" id="loginPassword" name="password" required>
+                                        </div>
+                                        <button type="submit" class="btn btn-success w-100">
+                                            <i class="fas fa-sign-in-alt me-2"></i>
+                                            Login
+                                        </button>
+                                        <div class="text-center mt-3">
+                                            <a href="#" class="text-muted small" data-bs-toggle="modal" data-bs-target="#forgotPasswordModal">
+                                                Forgot your password?
+                                            </a>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-6">
+                            <div class="card h-100">
+                                <div class="card-body">
+                                    <h5 class="card-title">
+                                        <i class="fas fa-user-plus text-info me-2"></i>
+                                        Register
+                                    </h5>
+                                    <form method="POST" action="/register">
+                                        <div class="mb-3">
+                                            <label for="registerName" class="form-label">Full Name</label>
+                                            <input type="text" class="form-control" id="registerName" name="name" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label for="registerEmail" class="form-label">Email</label>
+                                            <input type="email" class="form-control" id="registerEmail" name="email" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label for="registerDepartment" class="form-label">Department</label>
+                                            <input type="text" class="form-control" id="registerDepartment" name="department">
+                                        </div>
+                                        <div class="mb-3">
+                                            <label for="registerPassword" class="form-label">Password</label>
+                                            <input type="password" class="form-control" id="registerPassword" name="password" required>
+                                        </div>
+                                        <button type="submit" class="btn btn-info w-100">
+                                            <i class="fas fa-user-plus me-2"></i>
+                                            Register
+                                        </button>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        {% elif dashboard %}
+            <!-- Main Interface -->
+            <div class="row mb-4">
+                <div class="col-12">
+                    <h2>
+                        <i class="fab fa-linkedin me-2"></i>
+                        Connection Search
+                    </h2>
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="col-lg-8">
+                    <!-- Search Section -->
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h5 class="mb-0">
+                                <i class="fas fa-search me-2"></i>
+                                Intelligent Search
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <form method="POST" action="/search">
+                                <div class="input-group mb-3">
+                                    <input type="text" class="form-control" name="query" 
+                                           placeholder="Try: 'Who knows someone at Google?' or 'John Smith' or 'find Sarah'"
+                                           value="{{ search_query or '' }}">
+                                    <button class="btn btn-primary" type="submit">
+                                        <i class="fas fa-search"></i>
+                                        Search
+                                    </button>
+                                </div>
+                            </form>
+                            
+                            <div class="text-muted small">
+                                <strong>Search Examples:</strong>
+                                <ul class="mb-0">
+                                    <li><strong>By Company:</strong> "Who knows someone at Apple?" or "connections from Microsoft"</li>
+                                    <li><strong>By Name:</strong> "John Smith" or "find Sarah" or "show me Mike"</li>
+                                    <li><strong>Combined:</strong> "Find people at tech companies"</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Search Results -->
+                    {% if search_results %}
+                    <div class="card mb-4">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">
+                                <i class="fas fa-list-ul me-2"></i>
+                                Search Results ({{ search_results.count }})
+                            </h5>
+                            {% if search_results.results %}
+                            <form method="POST" action="/download_results" style="display: inline;">
+                                <input type="hidden" name="search_query" value="{{ search_query or '' }}">
+                                <button type="submit" class="btn btn-outline-primary btn-sm">
+                                    <i class="fas fa-download me-1"></i>
+                                    Download CSV
+                                </button>
+                            </form>
+                            {% endif %}
+                        </div>
+                        <div class="card-body">
+                            {% if search_results.results %}
+                                <div class="table-responsive">
+                                    <table class="table table-hover">
+                                        <thead>
+                                            <tr>
+                                                <th>Connection</th>
+                                                <th>Company</th>
+                                                <th>Position</th>
+                                                <th>Employee Contact</th>
+                                                <th>Confidence</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for result in search_results.results %}
+                                            <tr>
+                                                <td>
+                                                    <strong>{{ result.connection_name }}</strong>
+                                                </td>
+                                                <td>{{ result.company }}</td>
+                                                <td>{{ result.position or 'N/A' }}</td>
+                                                <td>
+                                                    {{ result.employee_name }}<br>
+                                                    <small class="text-muted">{{ result.employee_email }}</small>
+                                                </td>
+                                                <td>
+                                                    <span class="badge bg-{{ 'success' if result.match_confidence > 90 else 'warning' if result.match_confidence > 70 else 'secondary' }}">
+                                                        {{ result.match_confidence }}%
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            {% else %}
+                                <div class="text-center py-4">
+                                    <i class="fas fa-search fa-3x text-muted mb-3"></i>
+                                    <p class="text-muted">No connections found matching your search.</p>
+                                    <p class="small text-muted">Try refining your search terms or uploading more connection data.</p>
+                                </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    <!-- Upload Section -->
+                    <div class="card">
+                        <div class="card-header">
+                            <h5 class="mb-0">
+                                <i class="fas fa-upload me-2"></i>
+                                Upload LinkedIn Connections
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <form method="POST" action="/upload" enctype="multipart/form-data">
+                                <div class="mb-3">
+                                    <label for="csvFiles" class="form-label">Select Employee CSV Files</label>
+                                    <input type="file" class="form-control" id="csvFiles" name="files" accept=".csv" multiple required>
+                                    <div class="form-text">
+                                        Select multiple CSV files from employees' LinkedIn connections exports.
+                                        File names should include employee names (e.g., "john_smith_connections.csv").
+                                        Expected columns: First Name, Last Name, Company, Position, Connected On
+                                    </div>
+                                </div>
+                                <div class="mb-3">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox" id="autoDetectNames" name="auto_detect_names" checked>
+                                        <label class="form-check-label" for="autoDetectNames">
+                                            Automatically detect employee names from file names
+                                        </label>
+                                    </div>
+                                    <div class="form-text small">
+                                        If unchecked, you'll be prompted to enter employee details for each file.
+                                    </div>
+                                </div>
+                                <button type="submit" class="btn btn-success">
+                                    <i class="fas fa-upload me-2"></i>
+                                    Upload & Process Files
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-lg-4">
+                    <!-- Top Companies -->
+                    {% if top_companies %}
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h6 class="mb-0">
+                                <i class="fas fa-building me-2"></i>
+                                Top Companies
+                            </h6>
+                        </div>
+                        <div class="card-body">
+                            {% for company in top_companies %}
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span class="small">{{ company.company }}</span>
+                                <span class="badge bg-secondary">{{ company.count }}</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    <!-- Change Password -->
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h6 class="mb-0">
+                                <i class="fas fa-key me-2"></i>
+                                Change Password
+                            </h6>
+                        </div>
+                        <div class="card-body">
+                            <form method="POST" action="/change_password">
+                                <div class="mb-3">
+                                    <label for="currentPassword" class="form-label">Current Password</label>
+                                    <input type="password" class="form-control" id="currentPassword" name="current_password" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="newPassword" class="form-label">New Password</label>
+                                    <input type="password" class="form-control" id="newPassword" name="new_password" required>
+                                    <div class="form-text small">Minimum 6 characters</div>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="confirmPassword" class="form-label">Confirm New Password</label>
+                                    <input type="password" class="form-control" id="confirmPassword" name="confirm_password" required>
+                                </div>
+                                <button type="submit" class="btn btn-warning btn-sm">
+                                    <i class="fas fa-key me-1"></i>
+                                    Change Password
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Recent Searches -->
+                    {% if recent_searches %}
+                    <div class="card">
+                        <div class="card-header">
+                            <h6 class="mb-0">
+                                <i class="fas fa-history me-2"></i>
+                                Recent Searches
+                            </h6>
+                        </div>
+                        <div class="card-body">
+                            {% for search in recent_searches %}
+                            <div class="mb-3">
+                                <a href="#" class="text-decoration-none recent-search-link" 
+                                   data-query="{{ search.search_query }}" 
+                                   onclick="performSearch('{{ search.search_query }}')">
+                                    <div class="small fw-bold text-primary">{{ search.search_query }}</div>
+                                    <div class="small text-muted">
+                                        {{ search.results_count }} results • 
+                                        {{ moment(search.searched_at).fromNow() if moment else search.searched_at }}
+                                    </div>
+                                </a>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+        {% endif %}
+    </div>
+
+    <!-- Forgot Password Modal -->
+    <div class="modal fade" id="forgotPasswordModal" tabindex="-1" aria-labelledby="forgotPasswordModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="forgotPasswordModalLabel">
+                        <i class="fas fa-key me-2"></i>
+                        Reset Password
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <form method="POST" action="/forgot_password">
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label for="resetEmail" class="form-label">Email Address</label>
+                            <input type="email" class="form-control" id="resetEmail" name="email" required>
+                            <div class="form-text">
+                                Enter your email address and we'll send you a temporary password.
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-paper-plane me-1"></i>
+                            Send Reset Email
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>
